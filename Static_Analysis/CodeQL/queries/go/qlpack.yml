@@ -1,0 +1,4 @@
+name: icfg-go
+version: 1.0.0
+dependencies:
+  codeql/go-all: "*"

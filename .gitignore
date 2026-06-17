@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data files (too large, generated at runtime)
+*.db
+*.rvf
+*.rvf.lock
+*.log
+
+# Output directories
+Results/*/
+rms_db/
+output/
+checkpoints/
+explain_cache/
+
+# Environment
+.env
