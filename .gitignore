@@ -33,5 +33,5 @@ output/
 checkpoints/
 explain_cache/
 
-# Environment
-.env
+# Environment — .env included (keys stripped), but keep local secrets out
+.env.local
