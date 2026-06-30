@@ -32,28 +32,27 @@ DEEPSEEK_API_KEY=sk-...
 ```bash
 cd Localization/
 
-# Two-stage + iterative mode (our method)
-python3 pipeline.py \
-  --cves CVE-2013-7449 \
-  --step1-v2 \
-  --two-stage \
-  --iterative
+# Default: two-stage + iterative + call_site_windows (our method)
+python3 pipeline.py --cves CVE-2013-7449
+
+# Skip Step 2 (localization only)
+python3 pipeline.py --cves CVE-2013-7449 --no-step2
 ```
 
 ### 2. Run on multiple CVEs
 
 ```bash
-# First 10 CVEs
-python3 pipeline.py --limit 10 --step1-v2 --two-stage --iterative
+# First 10 CVEs (default)
+python3 pipeline.py
 
 # All CVEs, parallel
-python3 pipeline.py --limit 0 --workers 8 --step1-v2 --two-stage --iterative
+python3 pipeline.py --limit 0 --workers 8
 
 # Resume from CVE 50
-python3 pipeline.py --skip 50 --limit 0 --workers 8 --step1-v2 --two-stage --iterative
+python3 pipeline.py --skip 50 --limit 0 --workers 8 --resume
 
 # Specific CVEs
-python3 pipeline.py --cves CVE-2015-1862,CVE-2016-1234 --step1-v2 --two-stage --iterative
+python3 pipeline.py --cves CVE-2015-1862,CVE-2016-1234
 ```
 
 ### 3. Output
@@ -109,24 +108,42 @@ Three granularity metrics:
 
 | Flag | Description |
 |------|-------------|
-| `--step1-v2` | Use Stage 1 v2 pipeline (FileHunter + FuncPinpointer) |
-| `--two-stage` | Enable two-stage mode (Stage 1 files → Stage 2 functions) |
-| `--iterative` | Use IterativeFileHunter (multi-round agent) instead of single-pass |
-| `--no-step2` | Skip exploit chain tracing (Step 1 only) |
+| `--no-step1-v2` | Use legacy HybridAgent instead of iterative two-stage |
+| `--no-two-stage` | Disable Stage 1b FuncPinpointer (file-level only) |
+| `--no-iterative` | Use single-pass FileHunter instead of IterativeFileHunter |
+| `--no-step2` | Skip exploit chain tracing (Stage 1 only) |
+| `--step2-mode MODE` | Step 2 mode: `call_site_windows` (default), `greedy` |
 | `--no-kg` | Ablation: no BM25 / issue history / commit knowledge |
-| `--no-agent` | Heuristic-only mode (no LLM agent) |
-| `--no-refine` | Skip function refinement pass |
-| `--limit N` | Max CVEs (0 = all) |
+| `--limit N` | Max CVEs (0 = all, default: 10) |
 | `--skip N` | Skip first N CVEs (resume) |
 | `--cves A,B` | Specific CVE IDs (comma-separated) |
 | `--workers N` | Parallel workers (default 1) |
 | `--resume` | Skip CVEs with existing result.json |
 | `--output PATH` | Custom output directory |
 
+## Ablation Examples
+
+```bash
+# No-KG ablation: skip RMS DB, use SearchBackend-only retriever
+python3 pipeline.py --limit 10 --no-kg
+
+# Legacy HybridAgent (no iterative, no two-stage)
+python3 pipeline.py --limit 10 --no-step1-v2
+
+# File-level only (no FuncPinpointer, no Step 2)
+python3 pipeline.py --limit 10 --no-two-stage --no-step2
+
+# Single-pass FileHunter (no iterative rounds)
+python3 pipeline.py --limit 10 --no-iterative
+
+# Greedy ICFG PathTracer instead of call_site_windows
+python3 pipeline.py --limit 10 --step2-mode greedy
+```
+
 ## Pre-built Results
 
 682 CVE results available at `../Results/Localization_Step2_V16_Full/`. Generated with:
 
 ```bash
-python3 pipeline.py --limit 0 --workers 8 --step1-v2 --two-stage --iterative
+python3 pipeline.py --limit 0 --workers 8
 ```

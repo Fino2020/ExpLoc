@@ -11,7 +11,7 @@ ExpLoc/
 │   ├── GT_Function/                  # Function-level ground truth
 │   └── GT_Chains_V3/                 # Exploit chain ground truth (VTP evaluation)
 ├── Localization/                     # Our method
-│   ├── pipeline.py                   # Pipeline orchestrator
+│   ├── pipeline.py                   # Pipeline orchestrator (v2 iterative two-stage by default)
 │   ├── evaluate.py                   # Evaluation (file/function/module Acc@k)
 │   ├── step1_v2/                     # Stage 1: IterativeFileHunter + FuncPinpointer
 │   ├── step2_explainer/              # Stage 2: Exploit Chain Tracing
@@ -41,7 +41,9 @@ OPENAI_MODEL=deepseek-v4-flash
 
 ## Our Method
 
-### Stage 1: Iterative File Hunter + Function Pinpointer
+### Stage 1: Iterative File Hunter + Function Pinpointer (default)
+
+Activated by default. Use `--no-iterative` for single-pass FileHunter, `--no-two-stage` to skip FuncPinpointer, or `--no-step1-v2` for legacy HybridAgent.
 
 **Stage 1a — IterativeFileHunter** (multi-round LLM agent for file discovery)
 
@@ -55,6 +57,7 @@ Uses ACR's SearchBackend (class/function/text O(1) index) with 8 search APIs. LL
 | `get_code_around_line` | Read code context around a line |
 
 - Fallback: if <3 files found, retry without static evidence for wider search
+- Fallback: if 0 files found, retry with unified FileHunter
 - Output: `vulnerable_files[]` with scores and reasons
 
 **Stage 1b — FuncPinpointer** (single-pass LLM for function refinement)
@@ -67,23 +70,22 @@ Takes top-10 files from Stage 1a, extracts full function bodies via tree-sitter,
 
 ### Stage 2: Exploit Chain Tracing
 
-Two-phase agent that traces complete vulnerability exploit chains:
+**Default mode — call_site_windows** (ICFG call-site context + LLM classification):
 
-**Phase 1 — Keyword Extraction** (1 LLM call, no tools): Extracts `suspicious_functions`, `suspicious_files`, `search_terms`, `vulnerability_type`, `cwe_keywords` from the CVE report.
+1. Load ICFG CSV (CodeQL/Joern/ScubaTrace), filter call-type edges, cache to .pkl
+2. Extract context windows around each call site from top Stage 1 functions
+3. LLM classifies each context window into archetype slots: Source, Propagation, MissingValidation, Sink
+4. Output: `explanations[]` with `path_chain`, `statements`, `code_snippets`, `nl_summary`
 
-**Phase 2 — Exploit Chain Tracing** (3 rounds, 8 tools): Agent calls code search and call graph tools to trace Source → Propagation → MissingValidation → Sink:
+**Alternative — greedy** (ICFG PathTracer forward trace):
 
-| Tool | Source | Purpose |
-|------|--------|---------|
-| `search_code` / `search_method` / `search_class` | SearchBackend | Full codebase O(1) search |
-| `read_file` / `get_code_around` | SearchBackend | Read source context |
-| `pinpoint_line` | Repo files | Verify specific code lines exist |
-| `get_callees` / `get_callers` | ICFG | Downstream/upstream call tracing |
-| `find_path` | ICFG | Connect source → sink through call graph |
+1. Select best ICFG (ScubaTrace-first strategy)
+2. Forward trace from entry function with adaptive termination (tau=0.3, max_depth=15)
+3. Edge boosts: inter_call ≥0.25, call ≥0.20
+4. SINK_DB: per-language × per-vuln-type sink patterns (15 categories)
+5. NL explanation via LLM
 
-Strategy: Extract APIs → Search code → Read files → `get_callees` downstream → `get_callers` upstream → `find_path` → `pinpoint_line` verify each edge.
-
-Output: `exploit_chains[]` with verified edges (file, line, code), filled archetype slots, and NL summary.
+Switch with `--step2-mode greedy`.
 
 ### Key Design Decisions
 

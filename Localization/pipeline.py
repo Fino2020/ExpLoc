@@ -13,7 +13,6 @@ Usage:
   python3 pipeline.py --skip 50 --limit 0 --resume
 """
 
-import fcntl
 import io
 import json
 import os
@@ -23,15 +22,14 @@ import time
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 _LOC_DIR = os.path.dirname(os.path.abspath(__file__))
 if _LOC_DIR not in sys.path:
     sys.path.insert(0, _LOC_DIR)
 
 from shared.config import (
-    PROJECT_ROOT, DATASET_PATH, MANIFEST_PATH, OUTPUT_DIR,
-    REPO_BASE, RMS_DB_DIR,
+    MANIFEST_PATH, OUTPUT_DIR, REPO_BASE, RMS_DB_DIR,
 )
 
 
@@ -223,18 +221,6 @@ def run_step2(
     elif step2_mode == "greedy":
         return _run_step2_greedy(cve_id, issue_description, language, step1_result, repo_path)
 
-    elif step2_mode == "archetype":
-        return _run_step2_archetype(cve_id, issue_description, language, step1_result, repo_path)
-
-    elif step2_mode == "llm_guided":
-        return _run_step2_llm_guided(cve_id, issue_description, language, step1_result, repo_path)
-
-    elif step2_mode == "pure_llm":
-        return _run_step2_pure_llm(cve_id, issue_description, language, step1_result, repo_path)
-
-    elif step2_mode == "llm_cwe":
-        return _run_step2_llm_cwe(cve_id, issue_description, language, step1_result, repo_path)
-
     else:
         return {"cve_id": cve_id, "error": f"unknown_step2_mode: {step2_mode}", "explanations": []}
 
@@ -354,30 +340,6 @@ def _run_step2_greedy(
     }
 
 
-# (archetype, llm_guided, pure_llm, llm_cwe stubs kept for API compatibility)
-# These are imported lazily when requested — see legacy functions below.
-
-
-def _run_step2_archetype(cve_id, issue_description, language, step1_result, repo_path):
-    from pipeline_legacy import run_step2_archetype as _fn
-    return _fn(cve_id, issue_description, language, step1_result, repo_path)
-
-
-def _run_step2_llm_guided(cve_id, issue_description, language, step1_result, repo_path):
-    from pipeline_legacy import run_step2_llm_guided as _fn
-    return _fn(cve_id, issue_description, language, step1_result, repo_path)
-
-
-def _run_step2_pure_llm(cve_id, issue_description, language, step1_result, repo_path):
-    from pipeline_legacy import run_step2_pure_llm as _fn
-    return _fn(cve_id, issue_description, language, step1_result, repo_path)
-
-
-def _run_step2_llm_cwe(cve_id, issue_description, language, step1_result, repo_path):
-    from pipeline_legacy import run_step2_llm_cwe as _fn
-    return _fn(cve_id, issue_description, language, step1_result, repo_path)
-
-
 def _detect_vuln_types(text: str) -> list:
     """Lightweight CWE keyword detection from issue text."""
     patterns = {
@@ -417,9 +379,6 @@ def run_single_cve(
     no_refine: bool = False,
     no_kg: bool = False,
     step2_mode: str = "call_site_windows",
-    mock_nl: bool = False,
-    uniform_edges: bool = False,
-    no_slot_termination: bool = False,
     use_v2: bool = True,
     two_stage: bool = True,
     iterative: bool = True,
@@ -519,9 +478,6 @@ def run_batch(
     workers: int = 1,
     resume: bool = False,
     step2_mode: str = "call_site_windows",
-    mock_nl: bool = False,
-    uniform_edges: bool = False,
-    no_slot_termination: bool = False,
     use_v2: bool = True,
     two_stage: bool = True,
     iterative: bool = True,
@@ -556,7 +512,7 @@ def run_batch(
                 futures.append(executor.submit(
                     _process_single_cve,
                     (entry, output_dir, skip_step2, no_agent, no_refine, no_kg,
-                     False, step2_mode, mock_nl, uniform_edges, no_slot_termination,
+                     False, step2_mode,
                      use_v2, two_stage, iterative),
                 ))
             for future in as_completed(futures):
@@ -573,9 +529,7 @@ def run_batch(
                 entry, output_dir=output_dir,
                 skip_step2=skip_step2, no_agent=no_agent,
                 no_refine=no_refine, no_kg=no_kg,
-                step2_mode=step2_mode, mock_nl=mock_nl,
-                uniform_edges=uniform_edges,
-                no_slot_termination=no_slot_termination,
+                step2_mode=step2_mode,
                 use_v2=use_v2, two_stage=two_stage, iterative=iterative,
             )
             _save_and_print(result, output_dir)
@@ -583,7 +537,7 @@ def run_batch(
 
 def _process_single_cve(args_tuple: tuple) -> dict:
     entry, output_dir, skip_step2, no_agent, no_refine, no_kg, capture_log, \
-        step2_mode, mock_nl, uniform_edges, no_slot_termination, \
+        step2_mode, \
         use_v2, two_stage, iterative = args_tuple
 
     cve_id = entry["cve_id"]
@@ -593,8 +547,7 @@ def _process_single_cve(args_tuple: tuple) -> dict:
         return run_single_cve(
             entry, output_dir=output_dir, skip_step2=skip_step2,
             no_agent=no_agent, no_refine=no_refine, no_kg=no_kg,
-            step2_mode=step2_mode, mock_nl=mock_nl,
-            uniform_edges=uniform_edges, no_slot_termination=no_slot_termination,
+            step2_mode=step2_mode,
             use_v2=use_v2, two_stage=two_stage, iterative=iterative,
         )
 
@@ -691,8 +644,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-step2", action="store_true",
                         help="Skip exploit chain tracing (Stage 1 only)")
     parser.add_argument("--step2-mode", type=str, default="call_site_windows",
-                        choices=["call_site_windows", "greedy", "archetype",
-                                 "llm_guided", "pure_llm", "llm_cwe"],
+                        choices=["call_site_windows", "greedy"],
                         help="Step 2 mode (default: call_site_windows)")
 
     args = parser.parse_args()
@@ -716,9 +668,9 @@ if __name__ == "__main__":
         limit=args.limit,
         skip=args.skip,
         cve_list=cve_list,
-        skip_step2=args.no_step2 or args.no_kg,
+        skip_step2=args.no_step2,
         no_agent=False,
-        no_refine=args.no_kg,
+        no_refine=False,
         no_kg=args.no_kg,
         workers=args.workers,
         resume=args.resume,
