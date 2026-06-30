@@ -38,21 +38,22 @@ from shared.config import (
 def _get_all_backends() -> List[Tuple[OpenAI, str]]:
     """Build all available LLM backends for runtime fallback.
 
-    Priority: DS_KEY → DEEPSEEK.
+    Priority: DEEPSEEK → DS_KEY.
+    DeepSeek first because DS proxy may be rate-limited.
     Returns list of (client, model) tuples.
     """
     backends = []
-    if OPENAI_DS_API_KEY and OPENAI_BASE_URL:
-        backends.append((
-            OpenAI(api_key=OPENAI_DS_API_KEY, base_url=OPENAI_BASE_URL, max_retries=2,
-                   timeout=httpx.Timeout(300.0, connect=30.0, read=300.0)),
-            OPENAI_MODEL,
-        ))
     if DEEPSEEK_API_KEY:
         backends.append((
             OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL, max_retries=2,
                    timeout=httpx.Timeout(300.0, connect=30.0, read=300.0)),
             DEEPSEEK_MODEL,
+        ))
+    if OPENAI_DS_API_KEY and OPENAI_BASE_URL:
+        backends.append((
+            OpenAI(api_key=OPENAI_DS_API_KEY, base_url=OPENAI_BASE_URL, max_retries=2,
+                   timeout=httpx.Timeout(300.0, connect=30.0, read=300.0)),
+            OPENAI_MODEL,
         ))
     if not backends:
         raise RuntimeError("No LLM API key configured. Check .env file.")
@@ -290,11 +291,21 @@ def build_single_pass_prompt(
     resolved_issues: str,
     commit_history: str,
     file_context: str,
+    static_evidence: str = "",
 ) -> str:
-    """Assemble the 5-section prompt for single-pass mode."""
+    """Assemble the 6-section prompt for single-pass mode."""
     lang_line = f"Language: {language}" if language else ""
     vuln_types = detect_vuln_types(issue_description)
     vuln_line = f"Detected vulnerability types: {', '.join(vuln_types)}"
+
+    static_block = ""
+    if static_evidence:
+        static_block = f"""
+---
+SECTION 6: STATIC ANALYSIS FINDINGS (CodeQL/ICFG)
+---
+{static_evidence[:1500]}
+"""
 
     return f"""Analyze this vulnerability report and identify the most likely vulnerable files and functions.
 
@@ -325,9 +336,9 @@ SECTION 4: COMMIT HISTORY (BM25 search over commit messages)
 SECTION 5: FILE CONTEXT (tree-sitter signatures)
 ---
 {file_context[:4000] or "No file context available."}
-
+{static_block}
 ---
-Based on ALL five sections above, output your localization result as a JSON block inside ```json``` fences.
+Based on ALL sections above, output your localization result as a JSON block inside ```json``` fences.
 
 REMEMBER: Every function name in vulnerable_functions MUST come from Section 5 (FILE CONTEXT). Copy the exact function name and file path shown there. Do not invent names."""
 
@@ -346,7 +357,7 @@ class HybridAgent:
         self._backends = _get_all_backends()
         self.client, self.model = self._backends[0]
         self.exploration_log: List[dict] = []
-        self.max_multi_turns = 3
+        self.max_multi_turns = 1  # reduced from 3 for batch speed
 
         # DEEPSEEK backend for multi-turn tool calling (DS proxy doesn't support tools)
         if DEEPSEEK_API_KEY:
@@ -421,9 +432,22 @@ class HybridAgent:
                 top_k=20,
             )
 
+            # Section 6: Static analysis evidence (CodeQL/ICFG)
+            static_section = ""
+            try:
+                from step1_v2.static_evidence import load_static_evidence
+                static_section = load_static_evidence(
+                    cve_id, self.repo_path,
+                    list(all_mod_files),
+                    detect_vuln_types(issue_description),
+                )
+            except Exception:
+                pass
+
             prompt = build_single_pass_prompt(
                 issue_description, language,
                 directory_section, resolved_section, commit_section, file_context,
+                static_evidence=static_section,
             )
 
         result = self._call_llm(prompt)

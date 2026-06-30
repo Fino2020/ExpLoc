@@ -23,7 +23,7 @@ from shared.tree_sitter_utils import extract_all_functions_with_bodies
 
 # Maximum candidates to send to LLM (to keep prompt size manageable)
 MAX_FILES = 10
-MAX_FUNCS_PER_FILE = 30
+MAX_FUNCS_PER_FILE = 25
 MAX_BODY_SNIPPET_LINES = 20
 
 SYSTEM_REFINE = """You are a vulnerability localization expert performing a SECOND-PASS function refinement.
@@ -36,11 +36,12 @@ You receive:
 Your task: score EACH function for vulnerability relevance (0.0 to 1.0).
 
 SCORING GUIDELINES:
-- 0.90-1.00: Directly handles the vulnerable input/code path. The function body clearly processes the type of data mentioned in the CVE.
-- 0.70-0.89: Indirectly involved — called by the vulnerable path, or wraps/manages the vulnerable component.
-- 0.40-0.69: Tangentially related — utility/helper in the same file that touches similar data.
-- 0.10-0.39: Unlikely related — general-purpose function in the same file.
-- 0.00-0.09: Clearly unrelated — init, cleanup, logging, configuration.
+- Functions marked [STATIC EVIDENCE] are in the ICFG data-flow graph — these are STRONG candidates. Score them 0.60-1.00.
+- 0.85-1.00: [STATIC EVIDENCE] + function body clearly processes the vulnerability type described in the CVE.
+- 0.60-0.84: [STATIC EVIDENCE] but indirect role, or no static evidence but body clearly matches CVE description.
+- 0.30-0.59: Tangentially related — utility/helper in same file touching similar data types.
+- 0.05-0.29: Unlikely related — general-purpose function in the same file.
+- 0.00-0.04: Clearly unrelated — init, cleanup, logging, configuration.
 
 SCORE ALL functions in the list. Do not skip any. Use the FULL 0.0-1.0 range.
 
@@ -64,6 +65,8 @@ def refine_functions(
     llm_client: OpenAI,
     llm_model: str,
     original_functions: Optional[List[dict]] = None,
+    file_scores: Optional[Dict[str, float]] = None,
+    static_funcs: Optional[Dict[str, set]] = None,
 ) -> Tuple[List[dict], str]:
     """Second-pass function refinement on top predicted files.
 
@@ -75,13 +78,17 @@ def refine_functions(
         llm_client: OpenAI client
         llm_model: model name
         original_functions: original function predictions from agent (for merge)
+        file_scores: optional {file_path: score} for weighting
+        static_funcs: optional {file_path: {func_name, ...}} from ICFG/CodeQL
 
     Returns:
         (refined_functions, analysis_summary)
         refined_functions: list of {function, file, score, reason} sorted by score desc
     """
     # Step 1: Extract ALL functions from top files
-    candidates = _extract_candidates(repo_path, top_files[:MAX_FILES])
+    f_scores = file_scores or {}
+    s_funcs = static_funcs or {}
+    candidates = _extract_candidates_with_scores(repo_path, top_files[:MAX_FILES], f_scores, s_funcs)
 
     if not candidates:
         if original_functions:
@@ -127,13 +134,17 @@ def refine_functions(
 # Candidate extraction
 # ---------------------------------------------------------------------------
 
-def _extract_candidates(repo_path: str, file_paths: List[str]) -> List[dict]:
+def _extract_candidates_with_scores(
+    repo_path: str, file_paths: List[str], file_scores: Dict[str, float],
+    static_funcs: Dict[str, set] = None,
+) -> List[dict]:
     """Extract ALL functions from each file via tree-sitter.
 
-    Returns flat list of {function, file, score_base, body_snippet, start_line, end_line}
+    Returns flat list of {function, file, score_base, body_snippet, start_line, end_line, static_hit}
     """
     import os
 
+    s_funcs = static_funcs or {}
     all_funcs = []
     seen = set()
 
@@ -148,6 +159,9 @@ def _extract_candidates(repo_path: str, file_paths: List[str]) -> List[dict]:
         if not funcs:
             continue
 
+        file_score = file_scores.get(fpath, 0.1)
+        file_static = s_funcs.get(fpath, set())
+
         for fn in funcs[:MAX_FUNCS_PER_FILE]:
             key = (fpath, fn["name"])
             if key in seen:
@@ -161,11 +175,12 @@ def _extract_candidates(repo_path: str, file_paths: List[str]) -> List[dict]:
             all_funcs.append({
                 "function": fn["name"],
                 "file": fpath,
-                "score_base": 0.1,  # small base score from file prediction
+                "score_base": file_score,
                 "start_line": fn.get("start_line", 0),
                 "end_line": fn.get("end_line", 0),
                 "body_snippet": body,
                 "params": fn.get("params", "..."),
+                "static_hit": fn["name"] in file_static,
             })
 
     return all_funcs
@@ -190,13 +205,15 @@ def _build_refine_prompt(
 
     sections = []
     for i, (fpath, funcs) in enumerate(by_file.items()):
-        parts = [f"[{i+1}] File: {fpath} ({len(funcs)} functions)"]
+        file_score = funcs[0].get("score_base", 0.1) if funcs else 0.1
+        parts = [f"[{i+1}] File: {fpath} (score={file_score:.2f}, {len(funcs)} functions)"]
         for fn in funcs:
             body = fn.get("body_snippet", "")
-            indent_body = "\n".join(f"        {line}" for line in body.split("\n")[:15])
+            indent_body = "\n".join(f"        {line}" for line in body.split("\n")[:10])
+            static_tag = " [STATIC EVIDENCE]" if fn.get("static_hit") else ""
             parts.append(
                 f"  - {fn['function']}{fn.get('params', '()')}  "
-                f"L{fn.get('start_line', '?')}-L{fn.get('end_line', '?')}\n"
+                f"L{fn.get('start_line', '?')}-L{fn.get('end_line', '?')}{static_tag}\n"
                 f"    body:\n{indent_body}"
             )
         sections.append("\n".join(parts))
@@ -215,7 +232,7 @@ VULNERABILITY REPORT:
 ---
 CANDIDATE FUNCTIONS (extracted via tree-sitter from top predicted files):
 ---
-{candidate_text[:8000]}
+{candidate_text[:16000]}
 
 ---
 Based on the vulnerability report and function bodies above, score EVERY function for vulnerability relevance (0.0-1.0). Output as JSON inside ```json``` fences."""
@@ -309,7 +326,7 @@ def _fix_json(json_str: str) -> str:
 def _merge_function_scores(
     original: List[dict],
     refined: List[dict],
-    refinement_weight: float = 0.7,
+    refinement_weight: float = 0.5,
 ) -> List[dict]:
     """Merge original function predictions with refined scores.
 

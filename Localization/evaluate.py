@@ -670,6 +670,11 @@ def run_evaluation(
             skipped_no_pred += 1
             continue
 
+        # Skip CVEs with empty predictions (no files AND no functions)
+        if not predictions.top_files and not predictions.top_functions:
+            skipped_no_pred += 1
+            continue
+
         # Apply file-boosted re-ranking of functions (evaluation only, no data mutation)
         if file_boost > 0:
             predictions = apply_file_boost(predictions, file_boost)
