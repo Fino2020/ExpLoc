@@ -1,6 +1,6 @@
-# ExpLoc — Vulnerability Localization & Explanation
+# ExpLoc — Vulnerability Issue Localization & Explanation Generation
 
-Two-stage vulnerability localization with exploit chain explanation: given a CVE report, Stage 1 iteratively discovers vulnerable files and pinpoints functions; Stage 2 traces exploit chains through code search and call graph analysis.
+Two-step vulnerability localization with exploit chain explanation: given a vulnerability issue report, Step 1 iteratively discovers vulnerable files and pinpoints functions; Step 2 traces exploit chains through code search and call graph analysis.
 
 ## Project Architecture
 
@@ -13,11 +13,25 @@ ExpLoc/
 ├── Localization/                     # Our method
 │   ├── pipeline.py                   # Pipeline orchestrator (v2 iterative two-stage by default)
 │   ├── evaluate.py                   # Evaluation (file/function/module Acc@k)
-│   ├── step1_v2/                     # Stage 1: IterativeFileHunter + FuncPinpointer
-│   ├── step2_explainer/              # Stage 2: Exploit Chain Tracing
+│   ├── step1_v2/                     # Step 1: IterativeFileHunter + FuncPinpointer
+│   ├── step2_explainer/              # Step 2: Exploit Chain Tracing
 │   ├── shared/                       # Config, ICFG loader, GT loader, sink_db
 │   ├── step1_locator/                # Retriever, ranker, issue linker, memory store
 │   └── acr_baseline/                 # SearchBackend (O(1) code index) + ModelClient
+├── Static_Analysis/                  # ICFG construction (CodeQL + ScubaTrace/Joern)
+│   ├── CodeQL/                       # CodeQL-based ICFG extraction
+│   │   ├── codeql_auto_analyzer.py   # Auto-detect language, create DB, run queries
+│   │   ├── batch_runner.py           # Batch runner across CVEs
+│   │   └── queries/                  # .ql query files (7 languages)
+│   └── ScubaTrace/                   # Joern/ScubaTrace CPG → ICFG conversion
+│       ├── generate_cpg.py           # Generate Code Property Graph via Joern
+│       ├── generate_cpg_batch.py     # Batch CPG generation
+│       └── cpg_to_icfg.py            # Convert CPG to ICFG CSV
+├── KG_Construction/                  # Issue Resolution Knowledge Graph builder
+│   ├── Build_KG_GraphML.py           # Build per-repo Issue→Commit→File→Function GraphML KGs
+│   ├── Build_knowledge_graph.py      # Knowledge graph construction pipeline
+│   ├── data_collection.py            # NVD/OSV/GitHub data collection (OAuth2, token rotation)
+│   └── issue_history_generation.py   # Issue history JSON generation
 └── Results/
     └── Localization_Step2_V16_Full/  # 682 CVE results (Step1 + Step2)
 ```
@@ -28,7 +42,7 @@ ExpLoc/
 pip install -r requirements.txt
 ```
 
-Requires Python 3.12+. Configure `.env` in `Localization/`:
+Requires Python 3.12+. Configure `.env` at project root:
 
 ```
 REPO_BASE=/path/to/cloned/repos
@@ -37,79 +51,113 @@ OPENAI_BASE_URL=https://your-proxy/v1/
 OPENAI_MODEL=deepseek-v4-flash
 ```
 
----
+## Data Preparation
 
-## Our Method
+The pipeline requires three categories of pre-computed data:
 
-### Stage 1: Iterative File Hunter + Function Pinpointer (default)
+### 1. Clone Git Repositories
 
-Activated by default. Use `--no-iterative` for single-pass FileHunter, `--no-two-stage` to skip FuncPinpointer, or `--no-step1-v2` for legacy HybridAgent.
+```bash
+# Structure: $REPO_BASE/{CVE-ID}/{Owner}/{Project}
+# Example: /data/repos/CVE-2013-7449/hexchat/hexchat
+```
 
-**Stage 1a — IterativeFileHunter** (multi-round LLM agent for file discovery)
+### 2. Build ICFG (Static Analysis)
 
-Uses ACR's SearchBackend (class/function/text O(1) index) with 8 search APIs. LLM agent runs up to 5 rounds, calling 3-5 APIs per round, following a BROAD → TARGETED → DEEP DIVE → EXPAND strategy:
+```bash
+cd Static_Analysis/
 
-| API | Purpose |
-|-----|---------|
-| `search_code` / `search_code_in_file` | Search code strings across codebase or file |
-| `search_method` / `search_method_in_file` / `search_method_in_class` | Search function/method by name |
-| `search_class` / `search_class_in_file` | Search class by name |
-| `get_code_around_line` | Read code context around a line |
+# Option A: CodeQL (7 languages: C/C++, Python, JS/TS, Java, Go, Ruby, PHP)
+python3 CodeQL/batch_runner.py --limit 0 --workers 8
+# Output: Results/CodeQL/{CVE-ID}/icfg_icfg_db.csv
 
-- Fallback: if <3 files found, retry without static evidence for wider search
-- Fallback: if 0 files found, retry with unified FileHunter
-- Output: `vulnerable_files[]` with scores and reasons
+# Option B: ScubaTrace/Joern (CPG-based)
+python3 ScubaTrace/generate_cpg_batch.py --limit 0 --workers 8
+# Output: Results/ScubaTrace/{CVE-ID}/icfg_scubatrace.csv
+```
 
-**Stage 1b — FuncPinpointer** (single-pass LLM for function refinement)
+### 3. Build IR-KG (Issue Resolution Knowledge Graph)
 
-Takes top-10 files from Stage 1a, extracts full function bodies via tree-sitter, annotates with CodeQL static analysis alerts, and calls LLM in single-pass mode to identify specific vulnerable functions.
+```bash
+cd KG_Construction/
 
-- Scoring: CodeQL-matched functions (0.80-1.00) > commit-patch functions (0.55-0.79) > structural relations (0.30-0.54)
-- Fallback: if <3 functions, keep Stage 1a functions
-- Output: refined `vulnerable_functions[]`
+# Step 1: Collect issue/commit/PR metadata from NVD/OSV/GitHub
+python3 data_collection.py
 
-### Stage 2: Exploit Chain Tracing
+# Step 2: Generate issue history JSON per repo
+python3 issue_history_generation.py
 
-**Default mode — call_site_windows** (ICFG call-site context + LLM classification):
+# Step 3: Build GraphML knowledge graphs
+python3 Build_KG_GraphML.py
+# Output: Graphs/{owner}_{project}.graphml, history/history/{owner}_{project}.json
+```
 
-1. Load ICFG CSV (CodeQL/Joern/ScubaTrace), filter call-type edges, cache to .pkl
-2. Extract context windows around each call site from top Stage 1 functions
-3. LLM classifies each context window into archetype slots: Source, Propagation, MissingValidation, Sink
-4. Output: `explanations[]` with `path_chain`, `statements`, `code_snippets`, `nl_summary`
 
-**Alternative — greedy** (ICFG PathTracer forward trace):
+## Running the Pipeline
 
-1. Select best ICFG (ScubaTrace-first strategy)
-2. Forward trace from entry function with adaptive termination (tau=0.3, max_depth=15)
-3. Edge boosts: inter_call ≥0.25, call ≥0.20
-4. SINK_DB: per-language × per-vuln-type sink patterns (15 categories)
-5. NL explanation via LLM
+### Quick Start (single CVE)
 
-Switch with `--step2-mode greedy`.
+```bash
+cd Localization/
+python3 pipeline.py --cves CVE-2015-1862
+```
 
-### Key Design Decisions
+### Batch Mode (all 746 CVEs)
 
-- **Anti-leakage**: `before_date` filter on all commit searches; Issue linker uses only history JSON + git log
-- **LLM fallback chain**: `OPENAI_DEFAULT_KEY` → `OPENAI_DS_API_KEY` → `DEEPSEEK_API_KEY`
-- **IterativeFileHunter**: SearchBackend for DISCOVERY (O(1)), ICFG for VERIFICATION
-- **Exploit Chain**: Every edge must have `pinpoint_line`-verified line numbers
+```bash
+cd Localization/
+python3 pipeline.py --limit 0 --workers 8 --resume
+```
 
----
+`--resume` skips CVEs that already have a `result.json`, so interrupted runs can safely restart.
 
-## Evaluation
+### Full Command Reference
 
-Three granularities, strict top-k accuracy (ref: LocAgent R-Precision):
+```bash
+python3 pipeline.py [OPTIONS]
+```
 
-| Level | Metric | Definition |
-|-------|--------|------------|
-| File | Acc@1, Acc@3, Acc@5 (strict) | ALL GT files in top-k predictions |
-| Function | Acc@5, Acc@10 (strict) | ALL GT functions in top-k predictions |
-| Module | Acc@5, Acc@10 (relaxed) | ANY GT function in top-k (within patched class) |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--limit N` | `10` | Max CVEs to process (`0` = all) |
+| `--skip N` | `0` | Skip first N CVEs in manifest |
+| `--cves ID1,ID2` | — | Comma-separated CVE list (overrides `--limit`/`--skip`) |
+| `--output DIR` | `Results/Localization/Localization` | Output directory for result JSONs |
+| `--manifest PATH` | `Dataset/dataset_with_changed_files_filter.json` | Dataset manifest path |
+| `--workers N` | `1` | Parallel workers (recommend 4–8) |
+| `--resume` | off | Skip CVEs with existing `result.json` |
+
+### Ablation Variants
+
+| Flag | Effect |
+|------|--------|
+| `--no-kg` | Remove Issue Resolution KG (RQ3a: w/o IR-KG) |
+| `--no-step1-v2` | Use legacy HybridAgent instead of iterative two-stage (w/o Agent) |
+| `--no-step1-v2 --no-kg` | Remove both Agent and IR-KG (RQ3a: w/o both) |
+| `--no-step2` | Step 1 only (localization without explanation) |
+
+### Step 2 Mode
+
+| Flag | Description |
+|------|-------------|
+| `--step2-mode call_site_windows` | **(default)** ICFG call-site context windows + LLM slot classification |
+| `--step2-mode greedy` | ICFG PathTracer forward trace with adaptive termination |
+
+
+### Evaluation
 
 ```bash
 cd Localization/
 python3 evaluate.py --results ../Results/Localization_Step2_V16_Full
 ```
+
+Three granularities, strict top-k accuracy (ref: LocAgent R-Precision):
+
+| Level | Metric | Definition |
+|-----------|------------|------------|
+| File | Acc@1, Acc@3, Acc@5 (strict) | ALL GT files in top-k predictions |
+| Function | Acc@5, Acc@10 (strict) | ALL GT functions in top-k predictions |
+| Module | Acc@5, Acc@10 (relaxed) | ANY GT function in top-k (within patched class) |
 
 ### Results on Main Dataset (682 CVEs)
 

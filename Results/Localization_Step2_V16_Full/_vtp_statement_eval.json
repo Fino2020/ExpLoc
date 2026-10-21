@@ -1,0 +1,35 @@
+{
+  "config": {
+    "results": "/mnt/d/Desktop/ExpLoc_anonymous/Results/Localization_Step2_V16_Full",
+    "gt": "/mnt/d/Desktop/ExpLoc_anonymous/Dataset/GT_Chains_V3",
+    "tolerance": 0
+  },
+  "summary": {
+    "n_evaluated": 1,
+    "skipped_no_result": 0,
+    "skipped_no_gt": 0,
+    "skipped_no_step2": 0,
+    "skipped_empty_se": 0,
+    "macro_msp": 0.0,
+    "macro_msr": 0.0,
+    "macro_miou": 0.0,
+    "global_msp": 0.0,
+    "global_msr": 0.0,
+    "global_miou": 0.0,
+    "total_se": 2,
+    "total_sp": 4,
+    "total_intersection": 0
+  },
+  "per_cve": [
+    {
+      "msp": 0.0,
+      "msr": 0.0,
+      "miou": 0.0,
+      "n_pred": 2,
+      "n_gt": 4,
+      "n_inter": 0,
+      "n_union": 6,
+      "cve_id": "CVE-2013-7449"
+    }
+  ]
+}

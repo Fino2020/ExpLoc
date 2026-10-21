@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .cwe_archetypes.archetype_library import Archetype, get_archetype
-from .cwe_archetypes.cwe_mapper import CWEMapper
+from .cwe_archetypes.cwe_mapper import CWEMapper, infer_archetype_from_issue
 from .slot_classifier import SlotClassifier
 from .edge_selector import EdgeSelector, ScoredEdge
 from .termination import TerminationController, TerminationDecision, TerminationReason
@@ -116,6 +116,7 @@ class ArchetypeSearchEngine:
         edge_selector: EdgeSelector,
         termination: TerminationController,
         cwe_mapper: Optional[CWEMapper] = None,
+        llm = None,                        # ModelClient for LLM-based archetype inference
         max_frontier_size: int = 500,
         max_results: int = 5,
     ):
@@ -124,6 +125,7 @@ class ArchetypeSearchEngine:
         self.edge_selector = edge_selector
         self.termination = termination
         self.cwe_mapper = cwe_mapper
+        self.llm = llm
         self.max_frontier_size = max_frontier_size
         self.max_results = max_results
         self.max_call_sites_per_function: int = 100
@@ -395,10 +397,11 @@ class ArchetypeSearchEngine:
     # ------------------------------------------------------------------
 
     def _resolve_archetype(self, cve_id: str, issue_report: str) -> Archetype:
-        """Resolve CWE archetype: try CVE→CWE mapper first, then LLM from issue text."""
-        if self.cwe_mapper and cve_id:
-            archetype = self.cwe_mapper.get_archetype_for_cve(cve_id)
-            if archetype and archetype.family != "Generic":
+        """Resolve CWE archetype: LLM inference from issue text first, then keyword fallback."""
+        # Primary: LLM-based inference from issue report
+        if self.llm:
+            archetype, _desc, confidence = infer_archetype_from_issue(self.llm, issue_report)
+            if archetype and archetype.family != "Generic" and confidence >= 0.5:
                 return archetype
 
         # Fallback: classify CWE from issue report text (fast keyword heuristic)

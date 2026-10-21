@@ -23,6 +23,7 @@ from acr_baseline.model import ModelClient
 from acr_baseline.search_backend import SearchBackend
 from step2_explainer.icfg_tools import get_icfg_tools
 from step2_explainer.code_extractor import extract_code_snippets
+from step2_explainer.cwe_archetypes.cwe_mapper import infer_archetype_from_issue
 
 
 def verify_code_in_repo(repo_path: str, file_path: str, line: int) -> Optional[str]:
@@ -557,6 +558,10 @@ def generate_exploit_chain_simple(
     # Phase 1: extract issue keywords for call-site scoring
     phase1 = _run_phase1(llm, issue_description)
     search_boost = _code_search_boost(repo_path, phase1)
+
+    # ── Phase 1.5: infer vulnerability archetype from issue report (LLM-based, no NVD) ──
+    if archetype is None:
+        archetype, arc_desc, arc_conf = infer_archetype_from_issue(llm, issue_description)
 
     step1_files = [f.get('file', '') for f in (step1_functions or []) if f.get('file')]
 

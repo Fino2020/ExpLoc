@@ -1,7 +1,8 @@
 """
 CWE Mapper — CVE-ID → CWE-ID → family → archetype lookup.
+Also provides LLM-based vulnerability type inference from issue reports.
 
-Data sources:
+Data sources (for NVD fallback only):
   - nvdcve-2.0-{year}.json: CVE-ID → CWE-ID(s)
   - 1000.csv: CWE-ID → Name, Description, Hierarchy
 """
@@ -15,7 +16,90 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from .archetype_library import Archetype, get_archetype, list_families
+from .archetype_library import (Archetype, get_archetype, get_archetype_by_family,
+                                list_families, ARCHETYPE_LIBRARY)
+
+
+# ── LLM-based archetype inference prompt ────────────────────────────────
+
+def _build_archetype_catalog() -> str:
+    """Build a catalog of all archetype families for LLM selection."""
+    lines = []
+    for arch in ARCHETYPE_LIBRARY:
+        if arch.family == "Generic":
+            continue
+        slots_str = " → ".join(s.name for s in arch.slots if s.required)
+        lines.append(
+            f"- {arch.family}: {arch.display_name}\n"
+            f"  Required chain: {slots_str}"
+        )
+    lines.append("- Generic: (catch-all, use when no specific family matches)")
+    return "\n".join(lines)
+
+
+_ARCHETYPE_CATALOG = _build_archetype_catalog()
+
+ARC_INFER_PROMPT = f"""You are a vulnerability analysis expert. Read the vulnerability issue report and identify which vulnerability mechanism family it belongs to.
+
+AVAILABLE FAMILIES:
+{_ARCHETYPE_CATALOG}
+
+INSTRUCTIONS:
+1. Read the issue report carefully to understand the vulnerability mechanism.
+2. Select the SINGLE best-matching family from the list above.
+3. If multiple families could apply, choose the most specific one.
+4. If no family clearly matches, select "Generic".
+5. Also provide a brief natural-language description of the vulnerability mechanism.
+
+Output ONLY a JSON object inside ```json``` fences:
+```json
+{{
+  "family": "Memory-Buffer-Overflow",
+  "description": "The issue report describes a stack-based buffer overflow in the FTP command parser where user-supplied input is copied into a fixed-size buffer without length validation.",
+  "confidence": 0.85
+}}
+```"""
+
+
+def infer_archetype_from_issue(llm, issue_report: str) -> Tuple[Archetype, str, float]:
+    """Use LLM to infer the vulnerability archetype from an issue report.
+
+    Args:
+        llm: ModelClient with a .call(messages, temperature, max_tokens) method.
+        issue_report: The full text of the vulnerability issue report.
+
+    Returns:
+        (Archetype, natural_language_description, confidence)
+    """
+    try:
+        resp = llm.call(
+            [{"role": "user", "content": f"{ARC_INFER_PROMPT}\n\nISSUE REPORT:\n{issue_report[:4000]}"}],
+            temperature=0.0, max_tokens=1024,
+        )
+    except Exception:
+        return get_archetype(""), "LLM inference failed", 0.0
+
+    m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", resp)
+    if not m:
+        # Try without fences
+        m = re.search(r'(\{"family"[\s\S]*\})', resp)
+    if not m:
+        return get_archetype(""), f"Could not parse LLM response: {resp[:200]}", 0.0
+
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return get_archetype(""), f"JSON parse error: {resp[:200]}", 0.0
+
+    family = data.get("family", "").strip()
+    description = data.get("description", "").strip()
+    confidence = float(data.get("confidence", 0.5))
+
+    archetype = get_archetype_by_family(family)
+    if archetype is None:
+        archetype = get_archetype("")
+
+    return archetype, description, confidence
 
 
 @dataclass

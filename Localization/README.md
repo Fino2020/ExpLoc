@@ -4,6 +4,8 @@
 
 - Python 3.12+
 - Git repos cloned at `$REPO_BASE/{CVE-ID}/{owner}/{project}`
+- ICFG data (CodeQL or ScubaTrace CSVs) — see `../Static_Analysis/`
+- (Optional) IR-KG data (issue history + GraphML) — see `../KG_Construction/`
 
 ```bash
 pip install -r requirements.txt
@@ -15,7 +17,7 @@ Create `.env` at project root (`ExpLoc/.env`):
 
 ```bash
 # Required
-REPO_BASE=/mnt/e/Desktop/Localization_Repo/Localization_Repo
+REPO_BASE=/path/to/cloned/repos
 OPENAI_DEFAULT_KEY=sk-...
 OPENAI_BASE_URL=https://your-proxy/v1/
 OPENAI_MODEL=deepseek-v4-flash
@@ -24,6 +26,16 @@ OPENAI_MODEL=deepseek-v4-flash
 OPENAI_DS_API_KEY=sk-...
 DEEPSEEK_API_KEY=sk-...
 ```
+
+### Data Dependencies
+
+| Component | Required By | Build Command |
+|-----------|------------|---------------|
+| Git repos | Step 1 + Step 2 | Clone manually to `$REPO_BASE/{CVE-ID}/{Owner}/{Project}` |
+| ICFG CSVs | Step 2 (call_site_windows, greedy) | `cd ../Static_Analysis && python3 CodeQL/batch_runner.py` |
+| IR-KG (history + GraphML) | Step 1 legacy HybridAgent | `cd ../KG_Construction && python3 Build_KG_GraphML.py` |
+
+Step 1 iterative mode uses SearchBackend directly and does NOT require pre-built IR-KG.
 
 ## Quick Start
 
